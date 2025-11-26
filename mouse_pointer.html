@@ -54,96 +54,225 @@
   </div>
 
 <script>
-// Versão com filtros, média móvel e redução de ruído
 (function(){
   let ws = null;
+  let lastTouch = null;
+  let lastSingleTap = 0;
+  let isScrolling = false;
+  let sensitivity = 1.0;
   let gyroEnabled = false;
+  let moved = false;
+
+  // --- Variáveis do acelerômetro ---
   let accelListener = null;
+  let lastAX = null;
+  let lastAY = null;
 
-  // ====== Controle de suavização ======
-  const accelFactor = 6.0;
-  const minDelta = 0.03;            // Zona morta menor
-  const smoothFactor = 0.15;        // Filtro passa‑baixa
-  const velocityDamp = 0.92;        // Amortecimento
+  // Ajuste fino
+  let accelFactor = 4.5;
+  let minDelta = 0.08;
 
-  let smoothAX = 0, smoothAY = 0;
-  let velX = 0, velY = 0;
+  const statusEl = document.getElementById('status');
+  const wsUrlInput = document.getElementById('wsUrl');
+  const tokenInput = document.getElementById('token');
+  const connectBtn = document.getElementById('connectBtn');
+  const disconnectBtn = document.getElementById('disconnectBtn');
+  const pad = document.getElementById('pad');
+  const leftBtn = document.getElementById('leftBtn');
+  const rightBtn = document.getElementById('rightBtn');
+  const kbBtn = document.getElementById('kbBtn');
+  const keyboardDiv = document.getElementById('keyboard');
+  const textToType = document.getElementById('textToType');
+  const sendText = document.getElementById('sendText');
+  const toggleMode = document.getElementById('toggleMode');
+
+  function setStatus(s,color='#0b5'){
+    statusEl.textContent = s;
+    statusEl.style.background = color;
+  }
+
+  function connect(){
+    let url = wsUrlInput.value.trim();
+    const token = tokenInput.value.trim();
+    if(!url || !token) return alert("Informe endereço e token!");
+
+    // Ajusta WS/WSS automático
+    if(location.protocol === "https:" && url.startsWith("ws://")){
+      url = url.replace("ws://","wss://");
+    }
+
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({type:"auth", token}));
+      setStatus("Conectado a " + url, "#054");
+    };
+    ws.onclose = () => setStatus("Desconectado", "#a00");
+    ws.onerror = () => setStatus("Erro de conexão", "#a00");
+    ws.onmessage = msg => {
+      try{
+        const data = JSON.parse(msg.data);
+        if(data.type==='auth' && data.status==='ok'){
+          setStatus("Autenticado ✔", "#0a4");
+        } else if(data.type==='auth'){
+          setStatus("Token inválido ❌", "#a00");
+          ws.close();
+        }
+      }catch(e){}
+    };
+  }
+
+  function disconnect(){
+    if(ws){
+      try{
+        if(ws.readyState === WebSocket.OPEN){
+          ws.send(JSON.stringify({type:"disconnect"}));
+        }
+      }catch(e){}
+      disableMotion();
+      ws.close();
+    }
+    ws = null;
+    setStatus("Desconectado", "#a00");
+  }
+
+  connectBtn.addEventListener('click', connect);
+  disconnectBtn.addEventListener('click', disconnect);
 
   function send(obj){
     if(!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify(obj));
   }
 
-  // ====== Ativar sensores ======
+  // ============================================================
+  // ACELERÔMETRO / GIROSCÓPIO
+  // ============================================================
   async function enableMotion(){
     if(gyroEnabled) return;
+    if(typeof DeviceMotionEvent === 'undefined'){
+      alert("Seu dispositivo não suporta sensores de movimento.");
+      return;
+    }
 
-    if(typeof DeviceMotionEvent.requestPermission === "function"){
-      try{
+    try{
+      if(typeof DeviceMotionEvent.requestPermission === "function"){
         const perm = await DeviceMotionEvent.requestPermission();
         if(perm !== "granted"){
-          alert("Permissão negada");
+          alert("Permissão negada!");
           return;
         }
-      }catch(err){
-        alert("Erro ao solicitar permissão");
-        return;
       }
+    }catch(e){
+      alert("Erro ao solicitar permissão.");
+      return;
     }
 
     startAccelerometer();
   }
 
-  // ====== Processamento do acelerômetro com filtros ======
   function startAccelerometer(){
     gyroEnabled = true;
+    toggleMode.classList.add("active");
+    toggleMode.textContent = "Desativar controle por movimento";
+    pad.style.opacity = "0.5";
+
+    lastAX = null;
+    lastAY = null;
 
     accelListener = e =>{
-      if(!gyroEnabled) return;
-      if(!e.accelerationIncludingGravity) return;
+      if(!gyroEnabled || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const acc = e.accelerationIncludingGravity;
+      if(!acc) return;
 
-      let ax = e.accelerationIncludingGravity.x;
-      let ay = e.accelerationIncludingGravity.y;
+      let ax = acc.x, ay = acc.y;
 
-      // 1) Filtro passa‑baixa (suaviza ruído)
-      smoothAX = smoothAX + (ax - smoothAX) * smoothFactor;
-      smoothAY = smoothAY + (ay - smoothAY) * smoothFactor;
+      if(lastAX === null){
+        lastAX = ax; lastAY = ay; return;
+      }
 
-      // 2) Derivar movimento
-      let dx = ax - smoothAX;
-      let dy = ay - smoothAY;
+      let dx = ax - lastAX;
+      let dy = ay - lastAY;
 
-      // 3) Zona morta adaptativa
+      lastAX = ax; lastAY = ay;
+
       if(Math.abs(dx) < minDelta) dx = 0;
       if(Math.abs(dy) < minDelta) dy = 0;
+      if(dx === 0 && dy === 0) return;
 
-      // 4) Amortecimento (remove tremidas)
-      velX = velX * velocityDamp + dx;
-      velY = velY * velocityDamp + dy;
+      dx *= accelFactor;
+      dy *= accelFactor;
 
-      const mvX = velX * accelFactor;
-      const mvY = velY * accelFactor;
+      // Suaviza movimentos bruscos
+      dx = Math.sign(dx) * Math.min(Math.abs(dx), 15);
+      dy = Math.sign(dy) * Math.min(Math.abs(dy), 15);
 
-      if(Math.abs(mvX) < 0.01 && Math.abs(mvY) < 0.01) return;
-
-      // 5) Envio ao PC
-      send({ type: "gyro", dx: mvX, dy: mvY });
+      send({type:"gyro", dx, dy});
     };
 
     window.addEventListener("devicemotion", accelListener);
   }
 
-  // ====== Desativar ======
   function disableMotion(){
     gyroEnabled = false;
-    if(accelListener)
-      window.removeEventListener("devicemotion", accelListener);
+    toggleMode.classList.remove("active");
+    toggleMode.textContent = "Ativar controle por movimento";
+    pad.style.opacity = "1";
+    if(accelListener) window.removeEventListener("devicemotion", accelListener);
   }
 
-  // Expondo funções para você usar no HTML
-  window.enableMotion = enableMotion;
-  window.disableMotion = disableMotion;
+  toggleMode.addEventListener('click', ()=>{
+    if(!ws || ws.readyState !== WebSocket.OPEN){ alert("Conecte-se primeiro."); return; }
+    if(gyroEnabled) disableMotion(); else enableMotion();
+  });
 
+  // ============================================================
+  // TOUCHPAD
+  // ============================================================
+  pad.addEventListener('touchstart', e =>{
+    if(gyroEnabled) return; e.preventDefault(); moved=false;
+    const t = e.touches[0]; lastTouch={x:t.clientX,y:t.clientY};
+    isScrolling = e.touches.length>=2;
+  }, {passive:false});
+
+  pad.addEventListener('touchmove', e =>{
+    if(gyroEnabled) return; e.preventDefault(); moved=true;
+    const touches = e.touches;
+
+    if(isScrolling && touches.length>=2){
+      const cx=(touches[0].clientX+touches[1].clientX)/2;
+      const cy=(touches[0].clientY+touches[1].clientY)/2;
+      const dy=cy-lastTouch.y; lastTouch={x:cx,y:cy};
+      send({type:'scroll', dx:0, dy:-Math.round(dy*0.2)}); return;
+    }
+
+    const t = touches[0];
+    const dx = t.clientX - lastTouch.x;
+    const dy = t.clientY - lastTouch.y;
+    lastTouch={x:t.clientX,y:t.clientY};
+    send({type:'move', dx:Math.round(dx), dy:Math.round(dy), sensitivity});
+  }, {passive:false});
+
+  pad.addEventListener('touchend', e =>{
+    if(gyroEnabled) return; e.preventDefault();
+    if(moved) return;
+    const now=Date.now();
+    if(now-lastSingleTap<300){ send({type:'click', button:'left', clicks:2}); lastSingleTap=0; }
+    else{ send({type:'click', button:'left', clicks:1}); lastSingleTap=now; }
+  }, {passive:false});
+
+  leftBtn.addEventListener('click', ()=>send({type:'click', button:'left'}));
+  rightBtn.addEventListener('click', ()=>send({type:'click', button:'right'}));
+
+  kbBtn.addEventListener('click', ()=>{
+    const v = keyboardDiv.style.display==='flex';
+    keyboardDiv.style.display=v?'none':'flex';
+    if(!v) setTimeout(()=>textToType.focus(),120);
+  });
+
+  sendText.addEventListener('click', ()=>{
+    const txt=textToType.value; if(!txt) return;
+    send({type:'type', text:txt}); textToType.value='';
+  });
 })();
 </script>
 
