@@ -22,6 +22,19 @@
   #keyboard input { flex: 1; }
   #toggleMode { width: 100%; background: #444; color: white; }
   #toggleMode.active { background: #e09f1f; }
+  #sessionTimer { margin-top: 6px; font-size: 1rem; font-weight: bold; color: #054; background: #d7ffd7; padding: 6px 10px; border-radius: 8px; display: none; width: 100%; text-align: center; }
+  #usageStats { margin-top: 10px; padding: 10px; background: #eef; border-radius: 8px; display: none; }
+  #cursor-indicator { position: fixed; width: 14px; height: 14px; background: rgba(0, 150, 255, 0.9); border-radius: 50%; pointer-events: none; transform: translate(-50%, -50%); transition: transform 0.05s linear; z-index: 9999; }
+  #click-effect { position: fixed; width: 20px; height: 20px; border: 2px solid rgba(255, 255, 255, 0.8); border-radius: 50%; pointer-events: none; opacity: 0; transform: translate(-50%, -50%) scale(0.2); transition: opacity 0.2s, transform 0.2s; z-index: 9998; }
+  #force-meter { position: fixed; right: 15px; bottom: 20px; width: 12px; height: 120px; background: rgba(255, 255, 255, 0.15); border-radius: 10px; overflow: hidden; z-index: 9999; }
+  #force-fill { width: 100%; height: 0%; background: rgba(0, 200, 0, 0.9); transition: height 0.08s linear; }
+  #macroPanel {width: 100%;
+  padding: 15px;
+  background: #1e1e1e;
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 2px solid #444;}
 </style>
 </head>
 
@@ -29,6 +42,21 @@
   <div class="container">
     <h1>Mouse Pointer</h1>
     <div id="status">Desconectado</div>
+    <div id="sessionTimer">
+⏱ Tempo de sessão: 00:00:00
+    </div>
+    <div id="usageStats">
+
+  <h3>📊 Estatísticas de Uso</h3>
+  <p>Movimentos enviados: <span id="statMoves">0</span></p>
+  <p>Distância percorrida: <span id="statDist">0</span> px</p>
+  <p>Teclas enviadas: <span id="statKeys">0</span></p>
+  <p>Cliques enviados: <span id="statClicks">0</span></p>
+  <p>Modo usado mais vezes: <span id="statMode">touchpad</span></p>
+  
+    </div>
+
+
 
     <input type="text" id="wsUrl" placeholder="ws://192.168.x.x:8765" value="ws://192.168.0.100:8765">
     <input type="password" id="token" placeholder="Token" value="1234">
@@ -47,6 +75,60 @@
       <button id="kbBtn">⌨️ Teclado</button>
     </div>
 
+    <div id="profileSettings" class="box">
+    <h2>🎚️ Sensibilidade & Perfis</h2>
+
+    <label>Sensibilidade do Acelerômetro</label>
+    <input id="accelFactor" type="range" min="1" max="10" step="0.1">
+
+    <label>Sensibilidade do Giroscópio</label>
+    <input id="gyroFactor" type="range" min="0.5" max="10" step="0.1">
+
+    <label>Zona Morta (Deadzone)</label>
+    <input id="minDelta" type="range" min="0" max="2" step="0.01">
+
+    <label>Velocidade Geral do Cursor</label>
+    <input id="cursorSpeed" type="range" min="0.2" max="3" step="0.1">
+
+    <label>Suavização</label>
+    <input id="smoothing" type="range" min="0" max="1" step="0.05">
+
+    <hr>
+    <input id="profileName" placeholder="Nome do perfil">
+    <button id="saveProfileBtn">Salvar Perfil</button>
+
+    <select id="profileList"></select>
+    <button id="loadProfileBtn">Carregar Perfil</button>
+</div>
+
+    <!-- Indicador da posição do cursor -->
+  <div id="cursor-indicator"></div>
+
+  <!-- Animação de clique -->
+  <div id="click-effect"></div>
+
+  <!-- Indicador de força -->
+  <div id="force-meter">
+    <div id="force-fill"></div>
+  </div>
+
+  <!-- PAINEL DE MACROS -->
+<div id="macroPanel">
+  
+  <h3 style="text-align:center; color:red">⚡ Macros e Atalhos Rápidos</h3>
+
+  <div style="display:flex; flex-direction:column; gap:8px;">
+    <input id="macroName" placeholder="Nome da macro" style="width:100%; padding:10px;">
+    <input id="macroKeys" placeholder="Teclas (ex: CTRL+SHIFT+ESC)" style="width:100%; padding:10px;">
+    <button id="saveMacroBtn">Salvar</button>
+</div>
+
+  <div id="macroList"></div>
+</div>
+
+  <button id="toggleMacroPanel" style="width: 100%;margin-top: 10px;">⚡ Macros</button>
+
+
     <div id="keyboard" style="display:none;">
       <input type="text" id="textToType" placeholder="Digite algo...">
       <button id="sendText">Enviar</button>
@@ -56,6 +138,7 @@
 <script>
 (function(){
   let ws = null;
+  let isConnected = false;
   let lastTouch = null;
   let lastSingleTap = 0;
   let isScrolling = false;
@@ -73,6 +156,110 @@
   let accelFactor = 4.5;
   let minDelta = 0.08;
   let gyroFactor = 2.0;
+  let smoothing = 0.3;
+
+  // ---------- FEEDBACK VISUAL ----------
+  const cursorIndicator = document.getElementById("cursor-indicator");
+  const clickEffect = document.getElementById("click-effect");
+  const forceFill = document.getElementById("force-fill");
+
+  let cursorX = 0, cursorY = 0;
+
+  function updateCursor(dx, dy){
+    cursorX += dx * 1.2;
+    cursorY += dy * 1.2;
+
+    cursorIndicator.style.transform =
+      `translate(${cursorX}px, ${cursorY}px)`;
+  }
+
+  function showClickEffect(){
+    clickEffect.style.opacity = "1";
+    clickEffect.style.transform = "scale(1)";
+    setTimeout(()=>{
+      clickEffect.style.opacity = "0";
+      clickEffect.style.transform = "scale(0.2)";
+    }, 150);
+  }
+
+  function updateForceMeter(dx, dy){
+    const force = Math.min(1, Math.sqrt(dx*dx + dy*dy) / 25);
+    forceFill.style.height = (force * 100) + "%";
+  }
+
+  // ---------- ESTATÍSTICAS ----------
+  const stats = {
+    pointerMoves: 0,
+    pointerDistance: 0,
+    lastX: null,
+    lastY: null,
+    keysSent: 0,
+    clicksSent: 0,
+    modeUsage: { touchpad: 0, movement: 0 },
+    currentMode: "touchpad"
+  };
+
+  function resetStats(){
+    stats.pointerMoves = 0;
+    stats.pointerDistance = 0;
+    stats.lastX = null;
+    stats.lastY = null;
+    stats.keysSent = 0;
+    stats.clicksSent = 0;
+    stats.modeUsage.touchpad = 0;
+    stats.modeUsage.movement = 0;
+    stats.currentMode = "touchpad";
+  }
+
+  function setMode(mode){
+    if(!isConnected) return;
+    stats.currentMode = mode;
+    stats.modeUsage[mode]++;
+  }
+
+  function registerPointerMovement(dx, dy){
+    if(!isConnected) return;
+
+    stats.pointerMoves++;
+
+    if(stats.lastX !== null){
+      stats.pointerDistance += Math.sqrt(dx*dx + dy*dy);
+    }
+
+    stats.lastX = dx;
+    stats.lastY = dy;
+
+    updateCursor(dx, dy);
+    updateForceMeter(dx, dy);
+  }
+
+  function registerClick(){
+    if(!isConnected) return;
+    stats.clicksSent++;
+    showClickEffect();
+  }
+
+  function registerKey(){
+    if(!isConnected) return;
+    stats.keysSent++;
+  }
+
+  setInterval(() => {
+    document.getElementById("usageStats").style.display = "block";
+
+    document.getElementById("statMoves").textContent = stats.pointerMoves;
+    document.getElementById("statDist").textContent = Math.round(stats.pointerDistance);
+    document.getElementById("statKeys").textContent = stats.keysSent;
+    document.getElementById("statClicks").textContent = stats.clicksSent;
+
+    document.getElementById("statMode").textContent =
+      stats.modeUsage.touchpad > stats.modeUsage.movement
+      ? "touchpad"
+      : "movimento";
+
+  }, 500);
+
+  // ----------------------------------
 
   const statusEl = document.getElementById('status');
   const wsUrlInput = document.getElementById('wsUrl');
@@ -97,33 +284,68 @@
     const url = wsUrlInput.value.trim();
     const token = tokenInput.value.trim();
     if(!url || !token) return alert("Informe endereço e token!");
+
     ws = new WebSocket(url);
+
     ws.onopen = () => {
       ws.send(JSON.stringify({type:"auth", token}));
       setStatus("Conectado a " + url, "#054");
     };
-    ws.onclose = () => setStatus("Desconectado", "#a00");
+
+    ws.onclose = () => {
+      isConnected = false;
+      disableMotion();
+      setStatus("Desconectado", "#a00");
+    };
+
     ws.onerror = () => setStatus("Erro de conexão", "#a00");
+
     ws.onmessage = msg => {
       try{
         const data = JSON.parse(msg.data);
+
         if(data.type==='auth' && data.status==='ok'){
+          isConnected = true;
+          resetStats();
           setStatus("Autenticado ✔", "#0a4");
-        } else if(data.type==='auth'){
+          document.getElementById("sessionTimer").style.display = "block";
+          return;
+        }
+
+        if(data.type==='auth'){
           setStatus("Token inválido ❌", "#a00");
           ws.close();
+          return;
         }
-      }catch(e){}
+
+        if(data.type === "session_time"){
+          const sec = Math.floor(data.seconds);
+          const h = String(Math.floor(sec / 3600)).padStart(2,"0");
+          const m = String(Math.floor((sec % 3600) / 60)).padStart(2,"0");
+          const s = String(sec % 60).padStart(2,"0");
+
+          document.getElementById("sessionTimer").textContent =
+            `⏱ Tempo de sessão: ${h}:${m}:${s}`;
+        }
+
+      }catch(e){
+        console.error("Erro ao processar mensagem:", e);
+      }
     };
   }
 
   function disconnect(){
     if(ws){
-      try{ if(ws.readyState===WebSocket.OPEN) ws.send(JSON.stringify({type:"disconnect"})); }catch(e){}
+      try{
+        if(ws.readyState===WebSocket.OPEN)
+          ws.send(JSON.stringify({type:"disconnect"}));
+      }catch(e){}
+
       disableMotion();
       ws.close();
     }
-    ws=null;
+
+    isConnected = false;
     setStatus("Desconectado","#a00");
   }
 
@@ -131,7 +353,7 @@
   disconnectBtn.addEventListener('click', disconnect);
 
   function send(obj){
-    if(!ws || ws.readyState!==WebSocket.OPEN) return;
+    if(!isConnected) return;
     ws.send(JSON.stringify(obj));
   }
 
@@ -140,8 +362,8 @@
   // ============================================================
   async function enableMotion(){
     if(gyroEnabled) return;
+    if(!isConnected) return alert("Conecte-se primeiro!");
 
-    // Solicita permissão no iOS
     try{
       if(typeof DeviceMotionEvent.requestPermission==="function"){
         const perm = await DeviceMotionEvent.requestPermission();
@@ -151,13 +373,19 @@
         const perm = await DeviceOrientationEvent.requestPermission();
         if(perm!=="granted"){ alert("Permissão giroscópio negada"); return; }
       }
-    }catch(e){ alert("Erro ao solicitar permissão."); console.error(e); return; }
+    }catch(e){
+      alert("Erro ao solicitar permissão.");
+      console.error(e);
+      return;
+    }
 
     startSensors();
   }
 
   function startSensors(){
     gyroEnabled=true;
+    setMode("movement");
+
     toggleMode.classList.add("active");
     toggleMode.textContent="Desativar controle por movimento";
     pad.style.opacity="0.5";
@@ -165,9 +393,9 @@
     lastAX=null;
     lastAY=null;
 
-    // --- ACELERÔMETRO ---
     accelListener = e=>{
-      if(!gyroEnabled || !ws || ws.readyState!==WebSocket.OPEN) return;
+      if(!gyroEnabled || !isConnected) return;
+
       const acc = e.accelerationIncludingGravity;
       if(!acc) return;
 
@@ -175,26 +403,34 @@
       if(lastAX!==null){
         let dx = ax - lastAX;
         let dy = ay - lastAY;
+
         if(Math.abs(dx)<minDelta) dx=0;
         if(Math.abs(dy)<minDelta) dy=0;
+
         if(dx!==0 || dy!==0){
           dx*=accelFactor;
           dy*=accelFactor;
+
+          registerPointerMovement(dx, dy);
           send({type:"gyro", dx, dy});
         }
       }
-      lastAX=ax; lastAY=ay;
+      lastAX=ax; 
+      lastAY=ay;
     };
+
     window.addEventListener("devicemotion", accelListener);
 
-    // --- GIROSCÓPIO / ORIENTAÇÃO ---
     gyroListener = e=>{
-      if(!gyroEnabled || !ws || ws.readyState!==WebSocket.OPEN) return;
-      // alpha = yaw, beta = pitch, gamma = roll
+      if(!gyroEnabled || !isConnected) return;
+
       const dx = (e.gamma || 0) * gyroFactor;
       const dy = (e.beta || 0) * gyroFactor;
+
+      registerPointerMovement(dx, dy);
       send({type:"gyro", dx, dy});
     };
+
     window.addEventListener("deviceorientation", gyroListener);
 
     console.log("Sensores ativados");
@@ -202,33 +438,311 @@
 
   function disableMotion(){
     gyroEnabled=false;
+
     toggleMode.classList.remove("active");
     toggleMode.textContent="Ativar controle por movimento";
     pad.style.opacity="1";
+
+    setMode("touchpad");
+
     if(accelListener) window.removeEventListener("devicemotion", accelListener);
     if(gyroListener) window.removeEventListener("deviceorientation", gyroListener);
+
     console.log("Sensores desativados");
   }
 
   toggleMode.addEventListener('click', ()=>{
-    if(!ws || ws.readyState!==WebSocket.OPEN){ alert("Conecte-se primeiro"); return; }
+    if(!isConnected){
+      alert("Conecte-se primeiro");
+      return;
+    }
     if(gyroEnabled) disableMotion(); else enableMotion();
   });
 
   // ============================================================
-  // TOUCHPAD (sem alterações)
+  // TOUCHPAD
   // ============================================================
-  pad.addEventListener('touchstart', e=>{ if(gyroEnabled) return; e.preventDefault(); moved=false; const t=e.touches[0]; lastTouch={x:t.clientX,y:t.clientY}; isScrolling=e.touches.length>=2; }, {passive:false});
-  pad.addEventListener('touchmove', e=>{ if(gyroEnabled) return; e.preventDefault(); moved=true; const touches=e.touches; if(isScrolling && touches.length>=2){ const cx=(touches[0].clientX+touches[1].clientX)/2; const cy=(touches[0].clientY+touches[1].clientY)/2; const dy=cy-lastTouch.y; lastTouch={x:cx,y:cy}; send({type:"scroll", dx:0, dy:-Math.round(dy*0.2)}); return; } const t=touches[0]; const dx=t.clientX-lastTouch.x; const dy=t.clientY-lastTouch.y; lastTouch={x:t.clientX,y:t.clientY}; send({type:'move', dx:Math.round(dx), dy:Math.round(dy), sensitivity}); }, {passive:false});
-  pad.addEventListener('touchend', e=>{ if(gyroEnabled) return; e.preventDefault(); if(moved) return; const now=Date.now(); if(now-lastSingleTap<300){ send({type:'click', button:'left', clicks:2}); lastSingleTap=0; } else{ send({type:'click', button:'left', clicks:1}); lastSingleTap=now; } }, {passive:false});
+  pad.addEventListener('touchstart', e=>{
+    if(gyroEnabled) return;
+    if(!isConnected) return;
 
-  leftBtn.addEventListener('click', ()=> send({type:'click', button:'left'}));
-  rightBtn.addEventListener('click', ()=> send({type:'click', button:'right'}));
-  kbBtn.addEventListener('click', ()=>{ const v=keyboardDiv.style.display==='flex'; keyboardDiv.style.display=v?'none':'flex'; if(!v) setTimeout(()=> textToType.focus(), 120); });
-  sendText.addEventListener('click', ()=>{ const txt=textToType.value; if(!txt) return; send({type:'type', text:txt}); textToType.value=''; });
+    setMode("touchpad");
+
+    e.preventDefault();
+    moved=false;
+    const t=e.touches[0];
+    lastTouch={x:t.clientX,y:t.clientY};
+    isScrolling=e.touches.length>=2;
+  }, {passive:false});
+
+  pad.addEventListener('touchmove', e=>{
+    if(gyroEnabled) return;
+    if(!isConnected) return;
+
+    e.preventDefault();
+    moved=true;
+
+    const touches=e.touches;
+
+    if(isScrolling && touches.length>=2){
+      const cx=(touches[0].clientX+touches[1].clientX)/2;
+      const cy=(touches[0].clientY+touches[1].clientY)/2;
+      const dy=cy-lastTouch.y;
+      lastTouch={x:cx,y:cy};
+
+      send({type:"scroll", dx:0, dy:-Math.round(dy*0.2)});
+      return;
+    }
+
+    const t=touches[0];
+    const dx=t.clientX-lastTouch.x;
+    const dy=t.clientY-lastTouch.y;
+
+    lastTouch={x:t.clientX,y:t.clientY};
+
+    registerPointerMovement(dx, dy);
+    send({type:'move', dx:Math.round(dx), dy:Math.round(dy), sensitivity});
+  }, {passive:false});
+
+  pad.addEventListener('touchend', e=>{
+    if(gyroEnabled) return;
+    if(!isConnected) return;
+
+    e.preventDefault();
+
+    if(moved) return;
+
+    const now=Date.now();
+    if(now-lastSingleTap<300){
+      registerClick();
+      send({type:'click', button:'left', clicks:2});
+      lastSingleTap=0;
+    } else{
+      registerClick();
+      send({type:'click', button:'left', clicks:1});
+      lastSingleTap=now;
+    }
+  }, {passive:false});
+
+  leftBtn.addEventListener('click', ()=>{
+    if(!isConnected) return;
+    registerClick();
+    send({type:'click', button:'left'});
+  });
+
+  rightBtn.addEventListener('click', ()=>{
+    if(!isConnected) return;
+    registerClick();
+    send({type:'click', button:'right'});
+  });
+
+  kbBtn.addEventListener('click', ()=>{
+    const v=keyboardDiv.style.display==='flex';
+    keyboardDiv.style.display=v?'none':'flex';
+    if(!v) setTimeout(()=> textToType.focus(), 120);
+  });
+
+  sendText.addEventListener('click', ()=>{
+    if(!isConnected) return;
+
+    const txt=textToType.value;
+    if(!txt) return;
+
+    registerKey();
+    send({type:'type', text:txt});
+    textToType.value='';
+  });
+
+  // ============================================================
+  // PERFIS DE SENSIBILIDADE
+  // ============================================================
+
+  let currentProfile = {
+    name: "Padrão",
+    accelFactor: 4.5,
+    gyroFactor: 2.0,
+    minDelta: 0.08,
+    cursorSpeed: 1.0,
+    smoothing: 0.3
+  };
+
+  function applyProfile(p){
+    accelFactor = p.accelFactor;
+    gyroFactor = p.gyroFactor;
+    minDelta = p.minDelta;
+    sensitivity = p.cursorSpeed;
+    smoothing = p.smoothing;
+
+    document.getElementById("accelFactor").value = p.accelFactor;
+    document.getElementById("gyroFactor").value = p.gyroFactor;
+    document.getElementById("minDelta").value = p.minDelta;
+    document.getElementById("cursorSpeed").value = p.cursorSpeed;
+    document.getElementById("smoothing").value = p.smoothing;
+  }
+
+  function loadProfileList(){
+    const list = document.getElementById("profileList");
+    const profiles = JSON.parse(localStorage.getItem("wsProfiles") || "[]");
+
+    list.innerHTML = "";
+    profiles.forEach(p=>{
+      const opt = document.createElement("option");
+      opt.value = p.name;
+      opt.textContent = p.name;
+      list.appendChild(opt);
+    });
+  }
+
+  function saveProfile(){
+    const name = document.getElementById("profileName").value.trim();
+    if(!name) return alert("Dê um nome para o perfil!");
+
+    const newProfile = {
+      name,
+      accelFactor: Number(document.getElementById("accelFactor").value),
+      gyroFactor: Number(document.getElementById("gyroFactor").value),
+      minDelta: Number(document.getElementById("minDelta").value),
+      cursorSpeed: Number(document.getElementById("cursorSpeed").value),
+      smoothing: Number(document.getElementById("smoothing").value)
+    };
+
+    let profiles = JSON.parse(localStorage.getItem("wsProfiles") || "[]");
+
+    profiles = profiles.filter(p => p.name !== name);
+    profiles.push(newProfile);
+
+    localStorage.setItem("wsProfiles", JSON.stringify(profiles));
+
+    loadProfileList();
+    alert("Perfil salvo!");
+  }
+
+  function loadProfile(){
+    const name = document.getElementById("profileList").value;
+    if(!name) return;
+
+    const profiles = JSON.parse(localStorage.getItem("wsProfiles") || "[]");
+    const p = profiles.find(p=>p.name===name);
+    if(p){
+      currentProfile = p;
+      applyProfile(p);
+    }
+  }
+
+  document.getElementById("accelFactor").addEventListener("input", e=>{
+    accelFactor = Number(e.target.value);
+  });
+  document.getElementById("gyroFactor").addEventListener("input", e=>{
+    gyroFactor = Number(e.target.value);
+  });
+  document.getElementById("minDelta").addEventListener("input", e=>{
+    minDelta = Number(e.target.value);
+  });
+  document.getElementById("cursorSpeed").addEventListener("input", e=>{
+    sensitivity = Number(e.target.value);
+  });
+  document.getElementById("smoothing").addEventListener("input", e=>{
+    smoothing = Number(e.target.value);
+  });
+
+  document.getElementById("saveProfileBtn").addEventListener("click", saveProfile);
+  document.getElementById("loadProfileBtn").addEventListener("click", loadProfile);
+
+  applyProfile(currentProfile);
+  loadProfileList();
+
+  // ============================================================
+// MACROS PERSONALIZADAS
+// ============================================================
+
+function loadMacros(){
+  const macros = JSON.parse(localStorage.getItem("wsMacros") || "[]");
+  const list = document.getElementById("macroList");
+
+  list.innerHTML = "";
+
+  macros.forEach(macro => {
+    const div = document.createElement("div");
+    div.style.display = "flex";
+    div.style.gap = "10px";
+    div.style.marginBottom = "8px";
+    div.style.background = "#2a2a2a";
+    div.style.padding = "6px";
+    div.style.borderRadius = "6px";
+
+    div.innerHTML = `
+      <b style="flex:1;">${macro.name}</b>
+      <span style="flex:2;">${macro.keys.join(" + ")}</span>
+    `;
+
+    const sendBtn = document.createElement("button");
+    sendBtn.textContent = "Enviar";
+    sendBtn.onclick = () => {
+      if(!isConnected) return alert("Conecte-se ao servidor primeiro!");
+      send({ type:"macro", keys: macro.keys });
+    };
+
+    const delBtn = document.createElement("button");
+    delBtn.textContent = "X";
+    delBtn.style.background = "#a00";
+    delBtn.onclick = () => {
+      deleteMacro(macro.name);
+    };
+
+    div.appendChild(sendBtn);
+    div.appendChild(delBtn);
+    list.appendChild(div);
+  });
+}
+
+function deleteMacro(name){
+  let macros = JSON.parse(localStorage.getItem("wsMacros") || "[]");
+  macros = macros.filter(m => m.name !== name);
+  localStorage.setItem("wsMacros", JSON.stringify(macros));
+  loadMacros();
+}
+
+function saveMacro(){
+  const name = document.getElementById("macroName").value.trim();
+  const keysRaw = document.getElementById("macroKeys").value.trim();
+
+  if(!name) return alert("Dê um nome à macro!");
+  if(!keysRaw) return alert("Digite as teclas!");
+
+  const keys = keysRaw
+    .split("+")
+    .map(k => k.trim().toUpperCase())
+    .filter(k => k.length > 0);
+
+  if(keys.length === 0) return alert("Nenhuma tecla válida!");
+
+  let macros = JSON.parse(localStorage.getItem("wsMacros") || "[]");
+
+  // substituir macro se já existir
+  macros = macros.filter(m => m.name !== name);
+  macros.push({ name, keys });
+
+  localStorage.setItem("wsMacros", JSON.stringify(macros));
+
+  loadMacros();
+  alert("Macro salva!");
+}
+
+document.getElementById("saveMacroBtn").addEventListener("click", saveMacro);
+
+document.getElementById("toggleMacroPanel").addEventListener("click", () => {
+  const panel = document.getElementById("macroPanel");
+  panel.style.display = panel.style.display === "flex" ? "none" : "flex";
+});
+
+// carrega ao abrir app
+loadMacros();
+
 
 })();
 </script>
+
+
 
 
 </body>
